@@ -136,11 +136,19 @@ macOS 上把 `sha256sum` 换成 `shasum -a 256`。
 ### 不确定该不该用多线程？先自检
 
 ```bash
-python selftest.py                      # 用内置测试地址
-python selftest.py <你的URL># 换成自己的链路
+# 推荐：传一个 20 MB 以上的直链，才能测出真实吞吐
+python selftest.py https://github.com/<owner>/<repo>/releases/download/<tag>/<大文件>
+
+# 不传参数只做 TLS 连通性探测
+python selftest.py
 ```
 
 会实测单连接 vs 8 连接并给出建议线程数。
+
+> **为什么不传 URL 时不做测速？** 默认目标是本项目自己的 release 资产（约 18 KB），
+> 样本太小，耗时几乎全落在 TLS 握手与 RTT 上，据此得出的并发结论会失真。
+> 与其给一个误导性结论，不如直接告诉你换个大的文件来测。
+> 测吞吐**必须**有足够大的样本，这也是下面这条注意事项的由来。
 
 > ⚠️ 小心解读：CDN 会对同一 IP 的**高频 Range 请求**限流。
 > 若测出「并发反而更慢」，通常是对自己的源站打太密了，
@@ -225,20 +233,45 @@ GitHub release 的资产带官方 `sha256`，**应当始终校验**。`--gh-rele
 
 - 本工具**只做下载**，不执行下载到的任何内容
 - 默认不走代理、不发送任何遥测
-- 私有仓库建议用环境变量传token，避免进入 shell history：<br>
-  `export GITHUB_TOKEN=xxx`（PowerShell 用 `$env:GITHUB_TOKEN="xxx"`）
 - 下载完请自行校验 sha256 再运行
+
+### ⚠️ 关于 token 与 `--no-tls-verify`
+
+**不要同时使用这两个选项。** 关闭 TLS 证书校验后，你无法识别假冒的服务器；
+此时若请求里还带着 `Authorization: token ...`，中间人可以直接窃取它。
+
+工具会在这个组合出现时打印醒目告警。更安全的做法：
+
+| 场景 | 推荐做法 |
+|---|---|
+| 私有仓库 | `gh auth login` 让 gh CLI 处理认证，**不用** `--token` |
+| 需要 token | 保持 TLS 校验开启，别加 `--no-tls-verify` |
+| Windows 证书报错 | 只在确认是 schannel 吊销检查问题时临时用 `--no-tls-verify`，且不加 `--token` |
+
+传 token 时建议用环境变量，避免进入 shell history：
+
+```bash
+export GITHUB_TOKEN=xxx            # PowerShell: $env:GITHUB_TOKEN="xxx"
+```
+
+> **v1.0.1 修复的安全缺陷**：此前 `gh_api()` 在调用 GitHub API 时
+> **无条件**关闭了证书校验（`CERT_NONE`），同时又发送 `Authorization` 头。
+> 即使用户从未传过 `--no-tls-verify`，走该代码路径时 TLS 校验也会被静默关闭。
+> 现已改为默认校验证书，并新增「关闭校验 + 携带凭据」的显式告警。
+> 感谢 [独立安全审查](https://github.com/joker1point/gh-fast-download/issues) 指出。
 
 ---
 
 ## 八、开发与测试
 
 ```bash
-python tests/test_offline.py -v      # 16 个离线测试，不触网
+python tests/test_offline.py -v      # 28 个离线测试，不触网
 ```
 
 覆盖：分片数计算（向上取整 / 末片短块）、断点续传后字节级一致性、
-sha256 通过与失败路径、失败时保留分片、清理行为、CLI 契约、代理处理器构造。
+sha256 通过与失败路径、失败时保留分片、清理行为、CLI 参数校验、
+代理处理器构造，以及**凭据安全**（`gh_api` 默认必须校验 TLS、
+「关闭校验 + 携带凭据」必须告警）。
 
 CI 在 Linux / Windows / macOS × Python 3.8 / 3.12 六种组合下运行，
 **只跑离线测试**，不做真实下载（网络测试不适合进 CI）。

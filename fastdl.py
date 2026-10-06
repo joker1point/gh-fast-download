@@ -38,7 +38,7 @@ import urllib.parse
 import urllib.request
 from urllib.parse import unquote
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 DEFAULT_THREADS = 16
 DEFAULT_CHUNK = 8 * 1024 * 1024# 8 MiB
@@ -142,6 +142,28 @@ def build_opener(no_tls_verify: bool, use_proxy: bool):
     return urllib.request.build_opener(*handlers)
 
 
+# 关闭 TLS 校验时又携带凭据，是明确的中间人风险，必须显式告警。
+INSECURE_CREDENTIAL_WARNING = """\
+⚠️  安全警告：已关闭 TLS 证书校验（--no-tls-verify），同时检测到凭据（token）。
+    此组合下中间人可窃取你的 token —— 关闭校验后无法识别假冒的服务器。
+    建议：
+      · 私有仓库优先用 `gh auth login` 让 gh CLI 处理认证，避免传 --token；
+      · 或改用 SSH 拉取，绕开 HTTPS token；
+      · 仅在确认是 Windows schannel 吊销检查问题时才临时关闭校验，
+        且不要与 --token 同时使用。"""
+
+
+def warn_insecure_credential(no_tls_verify: bool, token: str | None) -> bool:
+    """在「关闭 TLS 校验 + 携带凭据」时发出告警。
+
+    返回 True 表示确实触发了告警（便于测试与调用方判断）。
+    """
+    if no_tls_verify and token:
+        print(INSECURE_CREDENTIAL_WARNING, file=sys.stderr, flush=True)
+        return True
+    return False
+
+
 def probe_size(opener, url: str, token: str | None):
     """用 Range 请求探测大小与是否支持断点续传。
 
@@ -183,8 +205,14 @@ def sha256_file(path: str, bufsize: int = 1 << 22) -> str:
 
 # ---------------------------------------------------------------- GitHub 集成
 
-def gh_api(path: str, token: str | None):
-    """调用 GitHub API。优先用 gh CLI（已登录时免token），否则用 urllib。"""
+def gh_api(path: str, token: str | None, no_tls_verify: bool = False):
+    """调用 GitHub API。优先用 gh CLI（已登录时免 token），否则用 urllib。
+
+    安全要点：`no_tls_verify` **默认关闭证书校验豁免**。
+    本函数在携带 Authorization 头时会发送凭据，若同时关闭 TLS 校验，
+    中间人即可窃取 token。因此只在调用方显式要求时才放宽校验。
+    （早期版本此处无条件设 CERT_NONE，属安全缺陷，已修正。）
+    """
     import subprocess
 
     try:
@@ -202,20 +230,25 @@ def gh_api(path: str, token: str | None):
     req.add_header("User-Agent", USER_AGENT)
     req.add_header("Accept", "application/vnd.github+json")
     req.add_header("Authorization", "token " + token)
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    if no_tls_verify:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        https_handler = urllib.request.HTTPSHandler(context=ctx)
+    else:
+        https_handler = urllib.request.HTTPSHandler()  # 默认：正常校验证书
     op = urllib.request.build_opener(
-        urllib.request.HTTPSHandler(context=ctx),
+        https_handler,
         urllib.request.ProxyHandler({}),
     )
     with op.open(req, timeout=60) as r:
         return json.loads(r.read().decode())
 
 
-def resolve_gh_release(repo: str, tag: str, token: str | None, asset: str | None):
+def resolve_gh_release(repo: str, tag: str, token: str | None, asset: str | None,
+                       no_tls_verify: bool = False):
     """把 owner/repo + tag 解析成 (url, size, sha256, name)。"""
-    data = gh_api("repos/%s/releases/tags/%s" % (repo, tag), token)
+    data = gh_api("repos/%s/releases/tags/%s" % (repo, tag), token, no_tls_verify)
     assets = data.get("assets") or []
     if not assets:
         raise RuntimeError("release %s 下没有可下载资产" % tag)
@@ -397,10 +430,12 @@ def main(argv=None) -> int:
                     help="从 GitHub release 下载，自动取 size 与官方 sha256")
     ap.add_argument("--tag", help="配合 --gh-release 使用的 tag")
     ap.add_argument("--asset", help="配合 --gh-release 指定资产名（多资产时必填）")
-    ap.add_argument("--token", help="私有仓库 token（也可用环境变量 GITHUB_TOKEN）")
+    ap.add_argument("--token", help="私有仓库 token（也可用环境变量 GITHUB_TOKEN）。"
+                                    "注意：不要与 --no-tls-verify 同时使用")
     ap.add_argument("--no-tls-verify", action="store_true",
                     help="关闭证书校验，等价 curl --ssl-no-revoke"
-                         "（Windows schannel 吊销检查失败时需要）")
+                         "（Windows schannel 吊销检查失败时需要）。"
+                         "会失去防中间人能力，勿与 --token 同用")
     ap.add_argument("--use-proxy", action="store_true",
                     help="走系统代理（默认直连；实测代理常更慢）")
     ap.add_argument("-k", "--keep-parts", action="store_true",
@@ -410,6 +445,7 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     token = args.token or os.environ.get("GITHUB_TOKEN")
+    warn_insecure_credential(args.no_tls_verify, token)
 
     url, size, sha, name = args.url, None, args.sha256, None
     if args.gh_release:
@@ -424,7 +460,7 @@ def main(argv=None) -> int:
                 )
             ap.error("--gh-release 需要配合 --tag TAG")
         url, size, sha, name = resolve_gh_release(
-            args.gh_release, args.tag, token, args.asset)
+            args.gh_release, args.tag, token, args.asset, args.no_tls_verify)
         print("资产 %s  %s" % (name, human(size)), flush=True)
     elif args.url and args.tag:
         # 反向误用：给了 --tag 却没给 --gh-release
@@ -466,4 +502,22 @@ if __name__ == "__main__":
     except RuntimeError as e:
         # 参数/远端数据这类用户可自行纠正的问题，给简洁提示而非 traceback
         print("错误：%s" % e, file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.HTTPError as e:
+        print("HTTP 错误：%s %s" % (e.code, e.reason), file=sys.stderr)
+        if e.code in (401, 403):
+            print("可能是私有仓库未认证或 token 无权限；"
+                  "私有仓库请用 `gh auth login` 或传 --token。", file=sys.stderr)
+        elif e.code == 404:
+            print("资源不存在：请检查 owner/repo、tag、资产名是否正确。",
+                  file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print("网络错误：%s" % e.reason, file=sys.stderr)
+        print("请检查网络连通性。若为证书问题，可尝试 --no-tls-verify。",
+              file=sys.stderr)
+        sys.exit(1)
+    except OSError as e:
+        # 磁盘写满、权限不足、路径非法等
+        print("系统错误：%s" % e, file=sys.stderr)
         sys.exit(1)

@@ -242,6 +242,84 @@ class TestOpeners(unittest.TestCase):
         self.assertTrue(any("HTTPSHandler" in type(h).__name__ for h in op.handlers))
 
 
+class TestCredentialSafety(unittest.TestCase):
+    """凭据安全回归测试。
+
+    起因（安全审查发现）：`gh_api()` 曾**无条件**设置
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    同时又在请求头里发送 Authorization token。这意味着即便用户从没传过
+    --no-tls-verify，只要走 urllib 回退路径携带 token，TLS 校验就被静默关闭，
+    中间人可直接窃取 token。
+
+    修复后：API 调用默认正常校验证书，仅在调用方显式要求时才放宽；
+    且「关闭校验 + 携带凭据」必须显式告警。
+    这几个测试钉住该契约，防止将来被改回去。
+    """
+
+    def test_gh_api_defaults_to_verifying_tls(self):
+        """gh_api 的 no_tls_verify 必须默认 False（即默认校验证书）。"""
+        import inspect
+        sig = inspect.signature(fastdl.gh_api)
+        self.assertIn("no_tls_verify", sig.parameters,
+                      "gh_api 必须暴露 no_tls_verify 参数")
+        self.assertIs(
+            sig.parameters["no_tls_verify"].default, False,
+            "gh_api 的 no_tls_verify 默认必须是 False —— 否则带 token 时"
+            "会静默放弃 TLS 校验（历史安全缺陷）",
+        )
+
+    def test_resolve_gh_release_defaults_to_verifying_tls(self):
+        import inspect
+        sig = inspect.signature(fastdl.resolve_gh_release)
+        self.assertIs(sig.parameters["no_tls_verify"].default, False)
+
+    def test_build_opener_verifies_by_default(self):
+        """默认 opener 不应包含关闭校验的 HTTPSHandler。"""
+        for use_proxy in (False, True):
+            op = fastdl.build_opener(no_tls_verify=False, use_proxy=use_proxy)
+            for h in op.handlers:
+                if type(h).__name__ != "HTTPSHandler":
+                    continue
+                # 未显式要求时，HTTPSHandler 不应带 CERT_NONE 上下文
+                ctx = getattr(h, "_context", None)
+                if ctx is not None:
+                    import ssl as _ssl
+                    self.assertNotEqual(ctx.verify_mode, _ssl.CERT_NONE)
+
+    def test_warns_when_insecure_and_token(self):
+        """关闭校验 + 有 token → 必须告警。"""
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            fired = fastdl.warn_insecure_credential(True, "ghp_secret")
+        self.assertTrue(fired)
+        out = buf.getvalue()
+        self.assertIn("安全警告", out)
+        self.assertIn("token", out)
+
+    def test_no_warning_without_token(self):
+        """只关闭校验、无凭据 → 不告警（此时无凭据可泄露）。"""
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            fired = fastdl.warn_insecure_credential(True, None)
+        self.assertFalse(fired)
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_no_warning_when_tls_verified(self):
+        """正常校验证书 → 即便有 token 也不告警。"""
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            fired = fastdl.warn_insecure_credential(False, "ghp_secret")
+        self.assertFalse(fired)
+        self.assertEqual(buf.getvalue(), "")
+
+
 class TestCliArgValidation(unittest.TestCase):
     """参数校验回归测试。
 

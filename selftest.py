@@ -2,8 +2,12 @@
 """环境自检：在下载大文件前，先确认这台机器的连通性与并发是否真的有效。
 
 用法:
-    python selftest.py                # 用内置的小测试文件（约 3MB）
-    python selftest.py <URL>          # 用自己的 URL 测试
+    python selftest.py                # 只做 TLS 探测（默认目标太小，不做测速）
+    python selftest.py <URL>          # 推荐：传一个 20MB 以上的直链测真实速度
+
+为什么默认不做测速：默认目标是本项目自己的 release 资产（约 18KB），
+样本太小，耗时会全落在 TLS 握手与 RTT 上，据此得出的并发结论会失真。
+测吞吐必须用足够大的文件，所以这里只做连通性探测并提示换 URL。
 
 会输出：
   1. TLS 是否可用（Windows schannel 吊销检查失败的探测）
@@ -21,9 +25,9 @@ import sys
 import time
 import urllib.request
 
-# 复用 fastdl 的 UTF-8 stdio 处理（导入即生效，保证 Windows 控制台不崩）
+# 复用 fastdl 的实现（导出即生效的 UTF-8 处理 + 统一的 Range 探测逻辑）
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from fastdl import _force_utf8_stdio  # noqa: E402
+from fastdl import _force_utf8_stdio, probe_size  # noqa: E402
 
 _force_utf8_stdio()
 
@@ -31,18 +35,32 @@ _force_utf8_stdio()
 # 每片仅 393KB 时，8 连接的总耗时几乎全花在 TLS 握手 + RTT 上，
 # 会得出「并发反而更慢」的错误结论。16MB 足以让传输时间占主导。
 TEST_BYTES = 16 * 1024 * 1024
-# 用release 资产：它稳定支持 HTTP Range。
-# 不要用 /archive/ 端点—— 它会忽略 Range 返回全量，导致测速失真。
-DEFAULT_URL = ("https://github.com/joker1point/flowwatch/releases/download/"
-               "v1.0.3/flowwatch-v1.0.3-win64-exe.zip")
+# 低于此值就不足以判断吞吐，直接拒绝给结论（避免误导）。
+MIN_USEFUL_SAMPLE = 8 * 1024 * 1024
+# 用本项目自己的 release 资产做默认目标：
+# 不依赖任何第三方仓库，链路可预期，且稳定支持 HTTP Range。
+# 注意不要用 /archive/ 端点——它会忽略 Range 返回全量，导致测速失真。
+# 想测自己关心的链路，直接传 URL：`python selftest.py <你的URL>`
+DEFAULT_URL = ("https://github.com/joker1point/gh-fast-download/releases/download/"
+               "v1.0.0/fastdl.py")
 
 
 def human(n: float) -> str:
+    """格式化**速率**（自带 /s）。文件大小请用 human_size。"""
     for u in ("B", "KiB", "MiB", "GiB"):
         if abs(n) < 1024.0:
             return "%.0f %s/s" % (n, u) if u == "B" else "%.1f %s/s" % (n, u)
         n /= 1024.0
     return "%.1f GiB/s" % n
+
+
+def human_size(n: float) -> str:
+    """格式化**文件大小**（不带 /s）。"""
+    for u in ("B", "KiB", "MiB", "GiB"):
+        if abs(n) < 1024.0:
+            return "%.0f %s" % (n, u) if u == "B" else "%.1f %s" % (n, u)
+        n /= 1024.0
+    return "%.1f GiB" % n
 
 
 def make_opener(no_tls_verify: bool, use_proxy: bool):
@@ -132,10 +150,38 @@ def main() -> int:
 
     opener = make_opener(no_tls, use_proxy=False)
 
+    # 先探测目标大小，据此决定样本量。
+    # 默认目标是本项目自己的 release 资产（很小），不足以判断吞吐，
+    # 此时必须明确告知用户换 URL，而不是吐出一个误导性的结论。
     try:
-        print("\n[2/3] 单连接速度（%.0f MiB 样本）" % (TEST_BYTES / 1048576))
+        total_size, supports_range = probe_size(opener, url, None)
+    except Exception as e:  # noqa: BLE001
+        print("\n无法探测文件大小：%s" % e)
+        print("请确认 URL 可访问，且支持 HTTP Range。")
+        return 1
+
+    if not supports_range:
+        print("\n该地址不支持 HTTP Range 请求，无法做并发测速。")
+        print("请换用支持 Range 的直链（GitHub release 资产天然支持）。")
+        return 1
+
+    sample = min(TEST_BYTES, total_size)
+    if sample < MIN_USEFUL_SAMPLE:
+        print("\n" + "=" * 56)
+        print("目标文件只有 %s，样本太小，不足以判断吞吐。" % human_size(total_size))
+        print("（时间几乎全耗在 TLS 握手与 RTT 上，结论会失真。）")
+        print("-" * 56)
+        print("请传入一个较大的文件来测真实速度，例如：")
+        print("  python selftest.py https://github.com/<owner>/<repo>/releases/"
+              "download/<tag>/<大文件>")
+        print("提示：选 20 MB 以上的资产，结果才有参考价值。")
+        print("=" * 56)
+        return 0
+
+    try:
+        print("\n[2/3] 单连接速度（%.0f MiB 样本）" % (sample / 1048576))
         t0 = time.perf_counter()
-        single = pull(opener, url, 0, TEST_BYTES - 1)
+        single = pull(opener, url, 0, sample - 1)
         dt1 = time.perf_counter() - t0
         s_rate = single / max(dt1, 0.001)
         print("  单连接 %s（%.1f MiB 用时 %.2fs）"
@@ -143,7 +189,7 @@ def main() -> int:
 
         print("\n[3/3] 8 连接并发速度（同量样本，可直接对比）")
         n = 8
-        bounds = [i * TEST_BYTES // n for i in range(n + 1)]
+        bounds = [i * sample // n for i in range(n + 1)]
         t0 = time.perf_counter()
         with concurrent.futures.ThreadPoolExecutor(n) as ex:
             futs = [ex.submit(pull, opener, url, bounds[i], bounds[i + 1] - 1)
