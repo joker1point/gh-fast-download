@@ -4,9 +4,17 @@
 ![python](https://img.shields.io/badge/python-3.8%2B-3776AB)
 ![dependencies](https://img.shields.io/badge/dependencies-zero-success)
 ![platform](https://img.shields.io/badge/platform-Windows%2FLinux%2FmacOS-0078D6)
+[![release](https://img.shields.io/github/v/release/joker1point/gh-fast-download)](https://github.com/joker1point/gh-fast-download/releases/latest)
+[![CI](https://github.com/joker1point/gh-fast-download/actions/workflows/ci.yml/badge.svg)](https://github.com/joker1point/gh-fast-download/actions/workflows/ci.yml)
 
 > **单连接下载大文件被限速到几十 KB/s？用多连接把它拉满。**
 > 单文件 Python 脚本，零依赖，复制即用。附断点续传与 sha256 校验。
+
+```bash
+# 不需要 clone，直接下附件就能用
+curl -LO https://github.com/joker1point/gh-fast-download/releases/latest/download/fastdl.py
+python fastdl.py <URL>
+```
 
 ---
 
@@ -29,7 +37,21 @@
 
 ## 二、快速开始
 
-零依赖，Python 3.8+ 直接跑：
+零依赖，Python 3.8+ 直接跑。**不需要 clone**，下个附件就能用：
+
+```bash
+# 下载脚本（永远指向最新版）
+curl -LO https://github.com/joker1point/gh-fast-download/releases/latest/download/fastdl.py
+```
+
+或者 clone 仓库（想跑测试、看源码用这个）：
+
+```bash
+git clone https://github.com/joker1point/gh-fast-download.git
+cd gh-fast-download
+```
+
+然后：
 
 ```bash
 # GitHub release：自动读取资产列表、文件大小、官方 sha256
@@ -47,6 +69,26 @@ python fastdl.py https://example.com/bigfile.tar.gz -t 32 -c 4
 ```
 
 Windows 上如果报证书错误，加 `--no-tls-verify`（原因见下方「踩过的坑」）。
+
+### 校验下载的脚本
+
+[每个 release](https://github.com/joker1point/gh-fast-download/releases/latest) 都附带 `SHA256SUMS`：
+
+```bash
+curl -LO https://github.com/joker1point/gh-fast-download/releases/latest/download/SHA256SUMS
+
+# --ignore-missing：只校验你实际下载了的文件
+# （SHA256SUMS 同时列了 fastdl.py 和 selftest.py，不加此参数会因缺文件报错）
+sha256sum -c SHA256SUMS --ignore-missing
+# fastdl.py: OK
+```
+
+macOS 上把 `sha256sum` 换成 `shasum -a 256`。
+
+> **自举小技巧**：本工具也能下载自己。后续版本可以这样更新：
+> ```bash
+> python fastdl.py --gh-release joker1point/gh-fast-download --tag v1.0.0 --asset fastdl.py
+> ```
 
 ---
 
