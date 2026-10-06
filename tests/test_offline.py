@@ -587,5 +587,87 @@ class TestCliArgValidation(unittest.TestCase):
                 pass  # 预期：进入远端调用阶段后失败，与参数校验无关
 
 
+class TestLimitMb(unittest.TestCase):
+    """--limit-mb：只下载前 N MiB（试水 / 演示做公平对比用）。
+
+    契约：
+      · 产物恰好 N 字节
+      · 内容等于源文件的**前 N 字节**（逐字节一致）
+      · 既然是截断文件，就必须跳过 sha256 校验，否则必然失败
+
+    这几个约束一旦破坏，演示脚本里「两种方式传输相同字节数」的前提就没了，
+    对比也就不公平了。
+    """
+
+    DATA = bytes((i * 13 + 7) % 256 for i in range(3 * 1024 * 1024))
+    URL = "https://example.com/big.bin"
+
+    def _run(self, argv):
+        from unittest import mock
+        opener = FakeOpener(self.DATA)
+        with mock.patch.object(fastdl, "build_opener", return_value=opener), \
+                mock.patch.object(fastdl, "probe_size",
+                                  return_value=(len(self.DATA), True)):
+            rc = fastdl.main(argv)
+        return rc
+
+    def _tmp_out(self, name="out.bin"):
+        tmp = tempfile.mkdtemp(prefix="fastdl_limit_")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        return os.path.join(tmp, name)
+
+    def test_clamps_to_exactly_n_bytes(self):
+        out = self._tmp_out()
+        rc = self._run([self.URL, "-o", out, "--limit-mb", "1",
+                        "-c", "1", "-t", "4"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(os.path.getsize(out), 1024 * 1024)
+
+    def test_clamped_content_is_prefix(self):
+        """截断内容必须精确等于源文件前 N 字节。"""
+        out = self._tmp_out()
+        self._run([self.URL, "-o", out, "--limit-mb", "1", "-c", "1", "-t", "4"])
+        with open(out, "rb") as f:
+            got = f.read()
+        self.assertEqual(got, self.DATA[:1024 * 1024])
+
+    def test_skips_sha256_when_clamped(self):
+        """给了完整文件的 digest 也不该校验失败——截断时必须跳过。"""
+        import hashlib
+        full = hashlib.sha256(self.DATA).hexdigest()
+        out = self._tmp_out()
+        rc = self._run([self.URL, "-o", out, "--limit-mb", "1", "-c", "1",
+                        "-t", "4", "--sha256", full])
+        self.assertEqual(rc, 0, "截断时应跳过 sha256，不该返回校验失败(3)")
+
+    def test_limit_larger_than_file_downloads_whole(self):
+        """--limit-mb 超过文件大小时，应下载完整文件并正常校验。"""
+        import hashlib
+        full = hashlib.sha256(self.DATA).hexdigest()
+        out = self._tmp_out()
+        rc = self._run([self.URL, "-o", out, "--limit-mb", "99", "-c", "1",
+                        "-t", "4", "--sha256", full])
+        self.assertEqual(rc, 0)
+        self.assertEqual(os.path.getsize(out), len(self.DATA))
+
+
+class TestPartCountForDemo(unittest.TestCase):
+    """演示脚本的前提：样本必须能切出多片，否则并发无从体现。
+
+    默认分片 8 MiB 配 4 MiB 样本只会切出 1 片 = 单连接，
+    演示会得出「没有加速」的错误结论。这里把这个前提钉住。
+    """
+
+    def test_default_chunk_would_starve_small_sample(self):
+        size, default_chunk = 4 * 1024 * 1024, 8 * 1024 * 1024
+        n = (size + default_chunk - 1) // default_chunk
+        self.assertEqual(n, 1, "默认 8MiB 分片配 4MiB 样本确实只有 1 片")
+
+    def test_small_chunk_yields_multiple_parts(self):
+        size, chunk = 4 * 1024 * 1024, 1 * 1024 * 1024
+        n = (size + chunk - 1) // chunk
+        self.assertEqual(n, 4, "1MiB 分片应切出 4 片")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

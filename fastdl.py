@@ -39,7 +39,7 @@ import urllib.parse
 import urllib.request
 from urllib.parse import unquote
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 DEFAULT_THREADS = 16
 DEFAULT_CHUNK = 8 * 1024 * 1024# 8 MiB
@@ -555,6 +555,9 @@ def main(argv=None) -> int:
     ap.add_argument("--list-assets", action="store_true",
                     help="只列出该 release 的所有资产及大小，不下载"
                          "（忘了资产名时用这个）")
+    ap.add_argument("--limit-mb", type=int, metavar="N",
+                    help="只下载前 N MiB（试水/测速用）。"
+                         "此时无法校验官方 sha256，且产物是截断的")
     ap.add_argument("--token", help="私有仓库 token（也可用环境变量 GITHUB_TOKEN）。"
                                     "注意：不要与 --no-tls-verify 同时使用")
     ap.add_argument("--no-tls-verify", action="store_true",
@@ -630,6 +633,21 @@ def main(argv=None) -> int:
         if not ranged:
             print("警告：服务端不支持 Range 请求，断点续传不可用，"
                   "并发加速效果也会受限。", file=sys.stderr)
+
+    # --limit-mb：只取前 N MiB。做法是直接把「文件大小」当成 N MiB，
+    # 分片逻辑自然只覆盖 [0, N MiB) 这个区间。
+    # 注意产物是截断的，因此必须跳过官方 sha256 校验（否则必然不匹配）。
+    if args.limit_mb:
+        limit = args.limit_mb * 1048576
+        if size > limit:
+            print("提示：--limit-mb 只下载前 %d MiB（共 %s），"
+                  "产物为截断文件，跳过 sha256 校验。"
+                  % (args.limit_mb, human(size)), flush=True)
+            size = limit
+            sha = None
+        else:
+            print("提示：--limit-mb %d 大于文件大小 %s，将下载完整文件。"
+                  % (args.limit_mb, human(size)), flush=True)
 
     dl = Downloader(
         url=url, out=out, size=size, sha256=sha, threads=args.threads,

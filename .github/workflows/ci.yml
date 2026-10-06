@@ -27,13 +27,14 @@ jobs:
 
       # 只校验语法与 CLI 契约，不做真实下载（网络测试不适合放进 CI）
       - name: 语法检查
-        run: python -m py_compile fastdl.py selftest.py
+        run: python -m py_compile fastdl.py selftest.py demo/compare_download.py tests/test_offline.py
 
       - name: CLI 契约
         run: |
           python fastdl.py --version
           python fastdl.py --help
           python selftest.py --help
+          python demo/compare_download.py --help
           # 确认非 TTY 环境下 --help 也能正常输出中文
           python fastdl.py --help > help.txt
           python -c "print('help.txt bytes:', len(open('help.txt','rb').read()))"

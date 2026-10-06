@@ -140,6 +140,7 @@ python test_offline.py
 | `--tag TAG` | release 的 tag，配合上面使用 | — |
 | `--asset NAME` | 资产名（一个 release 有多个资产时必填） | 唯一资产 |
 | `--list-assets` | 只列出该 release 的资产，不下载 | 关 |
+| `--limit-mb N` | 只下载前 N MiB（试水/测速）；产物截断，跳过校验 | 不限制 |
 | `-o, --out PATH` | 输出路径 | URL 末段 |
 | `-t, --threads N` | 并发线程数 | `16` |
 | `-c, --chunk-mb N` | 分片大小（MiB） | `8` |
@@ -162,6 +163,25 @@ python test_offline.py
 实测：2.9 MB 文件配 `-t 32 -c 4` 会切成 32 个 4 MB 分片，
 但文件只有 2.9 MB——绝大多数分片是空请求，时间全耗在
 32 次 TLS 握手和 CDN 限流上。**并发收益来自传输时间，不是请求数量。**
+
+注意一个连带影响：**分片大小也决定了最小有意义样本**。
+默认 `-c 8`（8 MiB）时，一个 4 MiB 的文件只会切出 **1 片**，
+等于单连接——并发无从体现。想在小文件上看到加速，请同时调小分片：
+
+```bash
+python fastdl.py <URL> -c 1 -t 8      # 1 MiB 分片，小文件也能切成多片
+```
+
+### 先试水再决定：`--limit-mb`
+
+文件很大、不确定值不值得下？先拉几 MB 看看速度：
+
+```bash
+# 只下前 5 MiB，看看这条链路到底多快
+python fastdl.py --gh-release owner/repo --tag v1.0.0 --asset big.zip --limit-mb 5
+```
+
+产物是**截断文件**，因此会跳过 sha256 校验（官方 digest 对不上是正常的）。
 
 ### 中途断了怎么办
 
@@ -305,16 +325,31 @@ export GITHUB_TOKEN=xxx            # PowerShell: $env:GITHUB_TOKEN="xxx"
 ## 八、开发与测试
 
 ```bash
-python tests/test_offline.py -v      # 28 个离线测试，不触网
+python tests/test_offline.py -v      # 49 个离线测试，不触网
 ```
 
 覆盖：分片数计算（向上取整 / 末片短块）、断点续传后字节级一致性、
 sha256 通过与失败路径、失败时保留分片、清理行为、CLI 参数校验、
-代理处理器构造，以及**凭据安全**（`gh_api` 默认必须校验 TLS、
-「关闭校验 + 携带凭据」必须告警）。
+代理处理器构造、`--limit-mb` 截断语义，以及**凭据安全**
+（`gh_api` 默认必须校验 TLS、「关闭校验 + 携带凭据」必须告警）。
 
 CI 在 Linux / Windows / macOS × Python 3.8 / 3.12 六种组合下运行，
 **只跑离线测试**，不做真实下载（网络测试不适合进 CI）。
+
+### 实机演示：与普通下载做对照
+
+想让别人直观看到效果，可以跑演示脚本：
+
+```bash
+python demo/compare_download.py                    # 默认素材（cli/cli 的 14.8MB 资产）
+python demo/compare_download.py --limit-mb 4       # 控制演示时长
+```
+
+它会依次展示「新用户流程」的三步，然后**用相同的字节数**分别跑
+单连接下载与并发下载，最后打印对比表和 sha256 一致性核对。
+
+> 演示前建议先跑一次确认耗时。**网络快时两者差距会很小**——
+> 这也是真实结论：并发收益取决于链路是否被限速，脚本会如实解读。
 
 ## 九、许可
 

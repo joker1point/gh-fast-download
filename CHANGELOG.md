@@ -5,6 +5,32 @@
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-06
+
+### 新增
+
+- **`--limit-mb N`**：只下载前 N MiB。用途有两个：
+  - **试水**：文件很大时先拉几 MB 看看速度，再决定要不要下完
+  - **可复现的测速对比**：让两种下载方式传输**完全相同的字节数**，
+    对比才公平（否则快的那个可能只是"下得少"）
+  - 实现上直接把「文件大小」当成 N MiB，分片逻辑自然只覆盖 `[0, N MiB)`；
+    产物是截断文件，因此**会跳过 sha256 校验**并明确提示
+- **`demo/compare_download.py`**：实机演示脚本，
+  一条命令跑完「新用户流程」并与普通单连接下载做对照，打印对比表
+
+### 关于演示脚本的两个设计约束（容易踩）
+
+写这个演示时踩了两次，记下来：
+
+1. **样本必须能切出多片，否则演示不出并发。**
+   fastdl 默认分片 8 MiB；若样本只有 4 MiB，只会切出 **1 片 = 单连接**，
+   结果必然是「没有加速」——这是假的结论。
+   所以演示脚本默认用 `-c 1`（1 MiB 分片），4 MiB 样本 → 4 片并发。
+2. **两种方式必须传输相同字节数。** 这正是 `--limit-mb` 的由来。
+
+另：演示脚本会检查**已发布脚本**是否支持所需选项。新功能未发版时，
+它会明确提示并退回仓库版本，而不是抛 `unrecognized arguments`。
+
 ## [1.1.0] - 2026-10-06
 
 本次起因：以**新用户视角**从零走一遍流程，发现三道拦路门槛。
@@ -110,7 +136,8 @@
 - 收尾清理拖垮主流程 → 清理失败只警告，不影响退出码
 - `Range` 未校验导致测速失真 → 强制校验 `Content-Range`
 
-[Unreleased]: https://github.com/joker1point/gh-fast-download/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/joker1point/gh-fast-download/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/joker1point/gh-fast-download/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/joker1point/gh-fast-download/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/joker1point/gh-fast-download/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/joker1point/gh-fast-download/releases/tag/v1.0.0
