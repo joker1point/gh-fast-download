@@ -1,0 +1,32 @@
+# 下载产物（分片与成品）
+*.parts/
+*.zip
+*.tar.gz
+*.exe
+*.bin
+*.dmg
+*.iso
+
+# 校验文件
+*.sha256
+*.md5
+
+# 进度/临时
+*.tmp
+*.part
+*.crdownload
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp

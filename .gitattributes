@@ -1,0 +1,10 @@
+# Line-ending strategy (do not rely on each machine's core.autocrlf)
+* text=auto
+
+# Python scripts: LF in the repo, CRLF in the working tree (primary target: Windows)
+*.py text eol=crlf
+
+# Docs: LF everywhere
+*.md text eol=lf
+*.txt text eol=lf
+LICENSE text eol=lf
