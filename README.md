@@ -72,7 +72,8 @@ Windows 上如果报证书错误，加 `--no-tls-verify`（原因见下方「踩
 
 ### 校验下载的脚本
 
-[每个 release](https://github.com/joker1point/gh-fast-download/releases/latest) 都附带 `SHA256SUMS`：
+[每个 release](https://github.com/joker1point/gh-fast-download/releases/latest) 都附带 `SHA256SUMS`。
+**在存放 `fastdl.py` 的目录里运行**：
 
 ```bash
 curl -LO https://github.com/joker1point/gh-fast-download/releases/latest/download/SHA256SUMS
@@ -85,9 +86,12 @@ sha256sum -c SHA256SUMS --ignore-missing
 
 macOS 上把 `sha256sum` 换成 `shasum -a 256`。
 
+> 若输出 `no file was verified` 且退出码为 1，说明当前目录里没有可校验的文件
+> ——先确认 `fastdl.py` 已下载到此处。
+
 > **自举小技巧**：本工具也能下载自己。后续版本可以这样更新：
 > ```bash
-> python fastdl.py --gh-release joker1point/gh-fast-download --tag v1.0.0 --asset fastdl.py
+> python fastdl.py --gh-release joker1point/gh-fast-download --tag v1.0.1 --asset fastdl.py
 > ```
 
 ---
