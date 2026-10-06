@@ -33,7 +33,10 @@ jobs:
         run: |
           python fastdl.py --version
           python fastdl.py --help
-          python selftest.py --help 2>/dev/null || python -c "import selftest"
+          python selftest.py --help
+          # 确认非 TTY 环境下 --help 也能正常输出中文
+          python fastdl.py --help > help.txt
+          python -c "print('help.txt bytes:', len(open('help.txt','rb').read()))"
 
       - name: 单元测试（离线，不触网）
         run: python tests/test_offline.py -v

@@ -176,7 +176,23 @@ def main() -> int:
     return 0
 
 
+def _force_utf8_stdio() -> None:
+    """把标准输出切到 UTF-8，避免 Windows cp1252/cp936 控制台编码报错。"""
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None:
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            try:
+                stream.reconfigure(errors="replace")
+            except Exception:  # noqa: BLE001
+                pass
+
+
 if __name__ == "__main__":
+    _force_utf8_stdio()
     try:
         sys.exit(main())
     except KeyboardInterrupt:
