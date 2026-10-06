@@ -39,6 +39,24 @@ DEFAULT_REPO = "cli/cli"
 DEFAULT_TAG = "v2.102.0"
 DEFAULT_ASSET = "gh_2.102.0_windows_amd64.zip"   # 14.8 MB
 
+# ⚠️ 为什么必须先跑 --preflight：**同一素材的提速波动极大**。
+#
+# 2026-10-06 本机实测（4 MiB 样本、-c 1、8 线程、相隔数小时）：
+#   cli/cli  windows zip : 0.90x（第一次）→ 2.06x（第二次）
+#   flowwatch win64-exe  : 2.31x         → 2.45x
+#
+# 注意 cli/cli 那两行差了 2.3 倍。我一度以为这是「该仓库 CDN 做了 IP 级
+# 聚合限速」的素材特性，但换到有效样本重测后就翻案了 —— 那是**网络波动**，
+# 不是素材特性。教训：两个数据点不足以支撑因果结论。
+#
+# 结论：素材名气大小与提速无关，**能不能演出效果主要取决于当时的链路状况**。
+# 所以这里保留名气大的第三方仓库做默认（演示更可信），
+# 而把「先测一把」这件事交给 --preflight。
+PREFLIGHT_REPOS = [
+    ("cli/cli", "v2.102.0", "gh_2.102.0_windows_amd64.zip"),
+    ("joker1point/flowwatch", "v1.0.3", "flowwatch-v1.0.3-win64-exe.zip"),
+]
+
 STEPS = 5
 
 
@@ -106,23 +124,162 @@ def single_connection_download(opener, url: str, out: str, nbytes: int) -> float
 
 # ---------------------------------------------------------------- 对照 B
 
-def fastdl_download(fastdl: str, args: argparse.Namespace, out: str) -> float:
-    """本工具下载。直接调用真实 CLI，演示的就是用户实际会跑的命令。"""
+def fastdl_download(fastdl: str, args: argparse.Namespace, out: str,
+                    repo: str | None = None, tag: str | None = None,
+                    asset: str | None = None, limit_mb: int | None = None,
+                    chunk_mb: int | None = None, quiet: bool = False) -> float:
+    """本工具下载。直接调用真实 CLI，演示的就是用户实际会跑的命令。
+
+    repo/tag/asset/limit_mb/chunk_mb 可覆盖，供预检逐一测试候选素材。
+    """
     cmd = [
         sys.executable, fastdl,
-        "--gh-release", args.repo, "--tag", args.tag, "--asset", args.asset,
-        "-o", out, "-t", str(args.threads), "-c", str(args.chunk_mb),
-        "--limit-mb", str(args.limit_mb),
+        "--gh-release", repo or args.repo,
+        "--tag", tag or args.tag,
+        "--asset", asset or args.asset,
+        "-o", out, "-t", str(args.threads),
+        "-c", str(chunk_mb if chunk_mb is not None else args.chunk_mb),
+        "--limit-mb", str(limit_mb if limit_mb is not None else args.limit_mb),
     ]
     if args.no_tls_verify:
         cmd.append("--no-tls-verify")
 
     t0 = time.perf_counter()
-    proc = subprocess.run(cmd)
+    sink = subprocess.DEVNULL if quiet else None
+    proc = subprocess.run(cmd, stdout=sink, stderr=sink)
     elapsed = time.perf_counter() - t0
     if proc.returncode != 0:
         print("  ⚠ fastdl 退出码 %d" % proc.returncode, file=sys.stderr)
     return elapsed
+
+
+# ---------------------------------------------------------------- 预检
+
+# 预检样本至少要能切成这么多片，否则测的其实是单连接
+PREFLIGHT_MIN_PARTS = 4
+
+
+def ensure_parallel_sample(sample_mb: int, chunk_mb: int) -> int:
+    """把样本抬高到能切出 PREFLIGHT_MIN_PARTS 片的最小 MiB 数。
+
+    这个函数存在的唯一理由：**样本切不出多片时，测出来的「并发无收益」是假的。**
+    本项目已经在这上面栽过两次 ——
+      · 首次写演示脚本：4 MiB 样本配默认 8 MiB 分片 → 1 片 → 显示 0.90x
+      · 首次写预检：1 MiB 样本配 1 MiB 分片     → 1 片 → 显示 0.70x（同期
+        4 MiB 样本实测明明是 2.31x）
+    """
+    if chunk_mb <= 0:
+        raise ValueError("chunk_mb 必须为正")
+    return max(sample_mb, chunk_mb * PREFLIGHT_MIN_PARTS)
+
+
+def preflight(args: argparse.Namespace) -> int:
+    """上台前先跑：用很小样本测几个候选素材，告诉你哪个能演出加速。
+
+    为什么需要它：不同 asset 主机对并发 Range 的策略不同。实测 cli/cli
+    的单连接反而比 flowwatch 快，但并发对它没有收益（0.90x）——
+    不做预检，很可能站在台上才发现演示效果是「并发更慢」。
+    """
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+    sys.path.insert(0, ROOT)
+    import fastdl as _m  # noqa: E402
+
+    # 样本下限：分片粒度是整数 MiB，最小 1 MiB，
+    # 要让并发成立（≥PREFLIGHT_MIN_PARTS 片）就必须抬到足够大。
+    # 1 MiB 样本只会切出 1 片 = 单连接，测出来必然是"并发没收益"的假象。
+    chunk_mb = 1
+    sample_mb = ensure_parallel_sample(args.limit_mb, chunk_mb)
+    sample = sample_mb * 1024 * 1024
+
+    workdir = os.path.join(ROOT, "_demo")
+    os.makedirs(workdir, exist_ok=True)
+    opener = make_opener(args.no_tls_verify)
+
+    print("=" * 70)
+    print("预检：候选素材的并发收益")
+    print("  样本 %s，分片 %d MiB → 每个素材切成 %d 片"
+          % (human(sample), chunk_mb, sample_mb // chunk_mb))
+    print("  （样本必须能切出多片，否则测的是单连接，必然显示「无收益」）")
+    print("=" * 70)
+    print("")
+
+    results = []
+    for repo, tag, asset in PREFLIGHT_REPOS:
+        print("→ %s @ %s" % (repo, tag))
+        try:
+            data = _m.gh_api("repos/%s/releases/tags/%s" % (repo, tag), None)
+            a = next((x for x in data["assets"] if x["name"] == asset), None)
+            if a is None:
+                print("   找不到资产 %s，跳过" % asset)
+                continue
+            url = a["browser_download_url"]
+        except Exception as e:  # noqa: BLE001
+            print("   查询失败：%s，跳过" % e)
+            continue
+
+        base_out = os.path.join(workdir, "pf_base.bin")
+        fast_out = os.path.join(workdir, "pf_fast.bin")
+        for p in (base_out, fast_out, fast_out + ".parts"):
+            if os.path.isdir(p):
+                shutil.rmtree(p, ignore_errors=True)
+            elif os.path.exists(p):
+                os.remove(p)
+
+        try:
+            tb = single_connection_download(opener, url, base_out, sample)
+            tf = fastdl_download(args.fastdl, args, fast_out, repo=repo, tag=tag,
+                                 asset=asset, limit_mb=sample_mb,
+                                 chunk_mb=chunk_mb, quiet=True)
+        except Exception as e:  # noqa: BLE001
+            print("   测量失败：%s，跳过" % e)
+            continue
+
+        rb = sample / max(tb, 0.001)
+        rf = sample / max(tf, 0.001)
+        gain = rf / rb if rb else 0
+        results.append((gain, repo, tag, asset))
+        print("   单连接 %8s   并发 %8s   提速 %.2fx"
+              % (rate(rb), rate(rf), gain))
+        print("")
+
+    if not results:
+        print("没测出可用结果，请检查网络后重试。")
+        return 1
+
+    results.sort(reverse=True)
+    print("=" * 70)
+    print("结论")
+    print("=" * 70)
+    for gain, repo, tag, asset in results:
+        verdict = ("✓ 推荐" if gain >= 2 else
+                   "△ 勉强" if gain >= 1.3 else
+                   "✗ 会翻车（并发无收益）")
+        print("  %-38s %6.2fx  %s" % (asset[:38], gain, verdict))
+    print("")
+
+    best_gain, best_repo, best_tag, best_asset = results[0]
+    if best_gain >= 2:
+        print("  → 用这个上台：")
+        print("    python demo/compare_download.py --no-tls-verify \\")
+        print("      --repo %s --tag %s --asset %s --limit-mb %d"
+              % (best_repo, best_tag, best_asset, sample_mb))
+    elif best_gain >= 1.3:
+        print("  → 收益一般但能看。建议加大样本（--limit-mb 8）再测，")
+        print("    或换单连接更慢的素材 —— 越慢越有戏。")
+    else:
+        print("  → 当前网络下并发普遍无收益，通常意味着：")
+        print("    · 这条链路单连接已不被限速（此刻这工具确实帮不上忙），或")
+        print("    · 本地网络拥堵 / CDN 在做 IP 级限流")
+        print("    建议换个时段再演示。")
+        print("")
+        print("    ⚠ 不要硬演。如实说明「并发收益取决于链路是否被限速」，")
+        print("      本身就是这个项目价值主张的一部分。")
+    print("=" * 70)
+    return 0
 
 
 # ---------------------------------------------------------------- 主流程
@@ -158,10 +315,16 @@ def main() -> int:
     ap.add_argument("--threads", type=int, default=8)
     ap.add_argument("--chunk-mb", type=int, default=1,
                     help="分片大小 MiB。默认 1 以保证小样本也能切出多片")
+    ap.add_argument("--preflight", action="store_true",
+                    help="只做「预检」：用很小样本测几个候选素材，"
+                         "告诉你哪个能演出加速效果。上台前先跑这个")
     ap.add_argument("--fastdl", default=DEFAULT_FASTDL)
     ap.add_argument("--no-tls-verify", action="store_true",
                     help="Windows schannel 吊销检查失败时需要")
     args = ap.parse_args()
+
+    if args.preflight:
+        return preflight(args)
 
     workdir = os.path.join(ROOT, "_demo")
     os.makedirs(workdir, exist_ok=True)
@@ -171,7 +334,10 @@ def main() -> int:
 
     # 清掉上次残留：否则「文件是否产出」的判断会被旧文件骗过，
     # 分片目录也可能让本次续传到旧内容上。
-    for p in (base_out, fast_out, fast_out + ".parts"):
+    for p in (base_out, fast_out, fast_out + ".parts",
+              os.path.join(workdir, "pf_base.bin"),
+              os.path.join(workdir, "pf_fast.bin"),
+              os.path.join(workdir, "pf_fast.bin.parts")):
         if os.path.isdir(p):
             shutil.rmtree(p, ignore_errors=True)
         elif os.path.exists(p):
@@ -307,6 +473,8 @@ def main() -> int:
         print("  解读：本次收益不明显。")
         print("        说明这条链路单连接已经不慢，或 CDN 对高频 Range 限流。")
         print("        这也是真实结论：并发收益取决于链路是否被限速。")
+        print("")
+        print("  → 演示前建议先跑 `--preflight` 挑素材，避免上台才发现是 0.9x。")
     print("=" * 70)
     print("演示产物：%s（可直接删）" % workdir)
     return 0

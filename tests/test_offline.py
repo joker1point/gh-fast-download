@@ -656,6 +656,9 @@ class TestPartCountForDemo(unittest.TestCase):
 
     默认分片 8 MiB 配 4 MiB 样本只会切出 1 片 = 单连接，
     演示会得出「没有加速」的错误结论。这里把这个前提钉住。
+
+    这个坑本项目踩过两次，所以除了断言算术，还直接测 demo 里的
+    ensure_parallel_sample()——那是专门用来防它的函数。
     """
 
     def test_default_chunk_would_starve_small_sample(self):
@@ -667,6 +670,50 @@ class TestPartCountForDemo(unittest.TestCase):
         size, chunk = 4 * 1024 * 1024, 1 * 1024 * 1024
         n = (size + chunk - 1) // chunk
         self.assertEqual(n, 4, "1MiB 分片应切出 4 片")
+
+    # ---- demo 的防呆函数
+
+    def _demo(self):
+        """导入 demo/compare_download.py（模块级无副作用，可安全导入）。"""
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "demo", "compare_download.py")
+        if not os.path.isfile(path):
+            self.skipTest("demo 脚本不存在")
+        spec = importlib.util.spec_from_file_location("_demo_cmp", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_ensure_parallel_sample_raises_tiny_sample(self):
+        """1 MiB 样本 + 1 MiB 分片 = 1 片 → 必须被抬到至少 4 MiB。"""
+        mod = self._demo()
+        self.assertGreaterEqual(mod.ensure_parallel_sample(1, 1), 4)
+        self.assertGreaterEqual(mod.ensure_parallel_sample(0, 1), 4)
+
+    def test_ensure_parallel_sample_keeps_larger_value(self):
+        """本来就够大的样本不应被改小。"""
+        mod = self._demo()
+        self.assertEqual(mod.ensure_parallel_sample(16, 1), 16)
+        self.assertEqual(mod.ensure_parallel_sample(64, 8), 64)
+
+    def test_ensure_parallel_sample_rejects_bad_chunk(self):
+        mod = self._demo()
+        with self.assertRaises(ValueError):
+            mod.ensure_parallel_sample(4, 0)
+
+    def test_ensured_sample_always_yields_enough_parts(self):
+        """核心不变量：抬过之后一定能切出 ≥2 片（否则测的是单连接）。"""
+        mod = self._demo()
+        for requested in (0, 1, 2, 3, 4):
+            for chunk in (1, 2, 8):
+                mb = mod.ensure_parallel_sample(requested, chunk)
+                parts = (mb * 1024 * 1024 + chunk * 1024 * 1024 - 1) // (
+                    chunk * 1024 * 1024)
+                self.assertGreaterEqual(
+                    parts, 2,
+                    "requested=%s chunk=%s → %s MiB 只有 %s 片"
+                    % (requested, chunk, mb, parts))
 
 
 if __name__ == "__main__":

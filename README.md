@@ -341,15 +341,24 @@ CI 在 Linux / Windows / macOS × Python 3.8 / 3.12 六种组合下运行，
 想让别人直观看到效果，可以跑演示脚本：
 
 ```bash
-python demo/compare_download.py                    # 默认素材（cli/cli 的 14.8MB 资产）
-python demo/compare_download.py --limit-mb 4       # 控制演示时长
+# 1) 上台前先预检：测出今天这条链路并发有没有收益
+python demo/compare_download.py --preflight --no-tls-verify
+
+# 2) 完整演示（用预检推荐的参数）
+python demo/compare_download.py --no-tls-verify --limit-mb 4
 ```
 
 它会依次展示「新用户流程」的三步，然后**用相同的字节数**分别跑
 单连接下载与并发下载，最后打印对比表和 sha256 一致性核对。
 
-> 演示前建议先跑一次确认耗时。**网络快时两者差距会很小**——
-> 这也是真实结论：并发收益取决于链路是否被限速，脚本会如实解读。
+⚠️ **一定要先预检。** 同一素材、同样参数，实测跑出过 0.90x 和 2.06x ——
+差 2.3 倍。能不能演出效果主要取决于当时的链路状况，不是素材名气。
+预检会告诉你今天行不行，别站在台上才发现是「并发更慢」。
+
+> 另一个会骗人的陷阱：**样本太小**。1 MiB 样本配 1 MiB 分片只有 1 片
+> = 单连接，必然显示"无收益"。预检已强制样本 ≥ 4 MiB 并写进测试。
+
+现场演示的完整台词与兜底方案见 [`demo/RUNBOOK.md`](demo/RUNBOOK.md)。
 
 ## 九、许可
 
