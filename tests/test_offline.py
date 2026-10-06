@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """离线单元测试：不起网络，纯本地逻辑校验。
 
-运行：
+运行（两种放法都支持）：
+    # 放在仓库里（tests/ 子目录）
     python tests/test_offline.py
+
+    # 从 release 附件平铺下载到与 fastdl.py 同级目录
+    python test_offline.py
+
+    # 或用 unittest 发现
     python -m unittest discover -s tests
 """
 import os
@@ -11,7 +17,36 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 兼容两种放置方式：
+#   · tests/test_offline.py  → fastdl.py 在上一级
+#   · test_offline.py        → fastdl.py 在同级
+#
+# 做法：从本文件所在目录逐级向上，找到**第一个含 fastdl.py 的目录**，
+# 并以最高优先级插入 sys.path。
+#
+# 为什么不能简单地"把父目录也加进去"：
+#   若父目录里恰好有个同名的无关 fastdl.py（很常见，比如工作区根目录），
+#   就会导入到错误的模块。只认最近的那个，避免误伤。
+def _find_fastdl_dir(start: str, max_up: int = 4):
+    """从 start 向上查找含 fastdl.py 的最近目录，找不到返回 None。"""
+    cur = start
+    for _ in range(max_up + 1):
+        if os.path.isfile(os.path.join(cur, "fastdl.py")):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:  # 已到根
+            break
+        cur = parent
+    return None
+
+
+_DIR = _find_fastdl_dir(os.path.dirname(os.path.abspath(__file__)))
+if _DIR is None:
+    raise ImportError(
+        "找不到 fastdl.py。请把它与本测试放在同一目录，"
+        "或保持仓库结构（tests/ 与 fastdl.py 同级）。"
+    )
+sys.path.insert(0, _DIR)
 
 import fastdl
 

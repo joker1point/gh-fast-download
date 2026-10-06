@@ -16,6 +16,8 @@ curl -LO https://github.com/joker1point/gh-fast-download/releases/latest/downloa
 python fastdl.py <URL>
 ```
 
+📋 [更新日志](CHANGELOG.md) · 🐛 [反馈问题](https://github.com/joker1point/gh-fast-download/issues) · 📄 [贡献指南](CONTRIBUTING.md)
+
 ---
 
 ## 一、它解决什么问题
@@ -88,6 +90,19 @@ macOS 上把 `sha256sum` 换成 `shasum -a 256`。
 
 > 若输出 `no file was verified` 且退出码为 1，说明当前目录里没有可校验的文件
 > ——先确认 `fastdl.py` 已下载到此处。
+
+### 想自己复验行为？附件里带了测试
+
+每个 release 也附带 `test_offline.py`（28 个离线测试，**不触网**），
+可以在本地独立验证代码行为，而不必相信文档描述：
+
+```bash
+BASE=https://github.com/joker1point/gh-fast-download/releases/latest/download
+curl -LO $BASE/fastdl.py -LO $BASE/test_offline.py -LO $BASE/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+python test_offline.py
+# Ran 28 tests ... OK
+```
 
 > **自举小技巧**：本工具也能下载自己。后续版本可以这样更新：
 > ```bash
