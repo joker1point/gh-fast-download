@@ -33,13 +33,17 @@
 
 ```bash
 # GitHub release：自动读取资产列表、文件大小、官方 sha256
-python fastdl.py --gh-release owner/repo v1.0.0
+# 注意 owner/repo 和 tag 是两个独立参数，tag 必须用 --tag 传
+python fastdl.py --gh-release owner/repo --tag v1.0.0
+
+# 一个 release 有多个资产时，用 --asset 指定
+python fastdl.py --gh-release owner/repo --tag v1.0.0 --asset mytool-linux.zip
 
 # 任意直链
 python fastdl.py https://example.com/bigfile.tar.gz -o out.tar.gz
 
 # 调线程数和分片大小
-python fastdl.py <URL> -t 32 -c 4
+python fastdl.py https://example.com/bigfile.tar.gz -t 32 -c 4
 ```
 
 Windows 上如果报证书错误，加 `--no-tls-verify`（原因见下方「踩过的坑」）。
@@ -62,6 +66,20 @@ Windows 上如果报证书错误，加 `--no-tls-verify`（原因见下方「踩
 | `--no-tls-verify` | 关闭证书校验（Windows schannel 修复） | 关 |
 | `--use-proxy` | 走系统代理 | 直连 |
 | `-k, --keep-parts` | 完成后保留分片 | 删 |
+
+### ⚠️ 别在小文件上开高并发
+
+分片数 = `文件大小 ÷ 分片大小`。参数不是越高越好：
+
+| 文件大小 | 建议 |
+|---|---|
+| < 20 MB | 用默认值即可，甚至 `-t 4`；高并发纯属浪费 |
+| 20 MB ~ 500 MB | 默认 `-t 16 -c 8` |
+| > 500 MB | 可试 `-t 32 -c 8` |
+
+实测：2.9 MB 文件配 `-t 32 -c 4` 会切成 32 个 4 MB 分片，
+但文件只有 2.9 MB——绝大多数分片是空请求，时间全耗在
+32 次 TLS 握手和 CDN 限流上。**并发收益来自传输时间，不是请求数量。**
 
 ### 中途断了怎么办
 

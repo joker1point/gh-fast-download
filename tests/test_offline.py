@@ -242,5 +242,60 @@ class TestOpeners(unittest.TestCase):
         self.assertTrue(any("HTTPSHandler" in type(h).__name__ for h in op.handlers))
 
 
+class TestCliArgValidation(unittest.TestCase):
+    """参数校验回归测试。
+
+    起因：README 曾把 `--gh-release owner/repo v1.0.0` 写成正确用法，
+    但 tag 必须是独立参数（--tag），导致该命令必然报错。
+    这类"文档写错→ 用户踩坑"的问题，用测试钉住。
+    """
+
+    def _err(self, argv):
+        """捕获 argparse 的错误退出，返回 stderr 文本。"""
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            with self.assertRaises(SystemExit) as cm:
+                fastdl.main(argv)
+        self.assertEqual(cm.exception.code, 2, "参数错误应以退出码 2 结束")
+        return buf.getvalue()
+
+    def test_gh_release_requires_tag(self):
+        self.assertIn("--tag", self._err(["--gh-release", "owner/repo"]))
+
+    def test_gh_release_with_bare_tag_gives_hint(self):
+        """README 里的错误写法应触发明确提示，且提示里含正确写法。"""
+        out = self._err(["--gh-release", "owner/repo", "v1.0.0"])
+        self.assertIn("--tag", out)
+        self.assertIn("正确写法", out)
+        self.assertIn("v1.0.0", out)
+
+    def test_tag_without_gh_release_rejected(self):
+        self.assertIn("--gh-release",
+                      self._err(["https://example.com/x.zip", "--tag", "v1.0.0"]))
+
+    def test_no_input_rejected(self):
+        self.assertTrue(self._err([]).strip())
+
+    def test_valid_args_pass_validation(self):
+        """参数齐全时不应被参数校验拦下。
+
+        只验证「不产生 SystemExit(2)」——后续远端调用是否成功
+        取决于 gh 是否可用，不属于离线测试范畴。
+        """
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            try:
+                fastdl.main(["--gh-release", "owner/repo", "--tag", "v1.0.0"])
+            except SystemExit as e:
+                self.fail("合法参数不应触发参数校验错误(exit 2)，实际 exit=%s，stderr=%s"
+                          % (e.code, buf.getvalue()))
+            except RuntimeError:
+                pass  # 预期：进入远端调用阶段后失败，与参数校验无关
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

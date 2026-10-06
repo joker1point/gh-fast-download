@@ -30,6 +30,16 @@ Linux / Windows / macOS × Python 3.8 / 3.12 六种组合下运行。
       （直连/代理、Range 支持/不支持）
 - [ ] README 中的参数表与实际 `--help` 一致
 
+### ⚠️ README 里的命令行必须逐字实跑过
+
+本项目吃过这个亏：README 写了
+`python fastdl.py --gh-release owner/repo v1.0.0`，
+看着合理，实际**必然报错** —— `owner/repo` 和 `v1.0.0` 是两个独立参数，
+tag只能用 `--tag` 传，裸写会被当成 `url`。
+
+改完 README 请把每条命令**复制粘贴真跑一遍**。参数校验改动尤其容易漏：
+`--gh-release` / `--tag` / `--asset` 三者的依赖关系很容易写错。
+
 ## 需要特别注意的两个坑
 
 这两个是本项目实测踩过的，改动时别踩回去：

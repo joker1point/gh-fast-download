@@ -231,7 +231,8 @@ def resolve_gh_release(repo: str, tag: str, token: str | None, asset: str | None
     else:
         if len(assets) > 1:
             names = ", ".join(a["name"] for a in assets)
-            raise RuntimeError("该 release 有多个资产，请用 --asset指定：%s" % names)
+            raise RuntimeError("该 release 有多个资产，请用 --asset 指定其一：%s"
+                               % names)
         picked = assets[0]
     digest = picked.get("digest") or ""
     sha = digest.split("sha256:")[-1] if digest.startswith("sha256:") else None
@@ -308,6 +309,16 @@ class Downloader:
         print("分片数 %d  线程 %d  已有 %.1f MiB (%.1f%%)"
               % (self.n_parts, self.threads, pre / 1048576, pre * 100.0 / self.size),
               flush=True)
+
+        # 参数明显过头时提醒：并发收益来自传输时间，不是请求数量。
+        # 线程数远超分片数 = 大量空转线程；文件太小则传输时间不足以摊薄握手。
+        if self.threads > max(self.n_parts, 1) * 2:
+            print("提示：线程数(%d) 远超分片数(%d)，多数线程会空等，"
+                  "建议 -t %d 左右。" % (self.threads, self.n_parts,
+                                       max(2, self.n_parts)), flush=True)
+        elif self.size < 20 * 1048576 and self.threads > 8:
+            print("提示：文件仅 %.1f MiB，高并发收益有限（时间会耗在握手而非传输），"
+                  "建议用默认值或更小的 -t。" % (self.size / 1048576), flush=True)
 
         t0 = time.perf_counter()
         p = Printer()
@@ -403,10 +414,21 @@ def main(argv=None) -> int:
     url, size, sha, name = args.url, None, args.sha256, None
     if args.gh_release:
         if not args.tag:
-            ap.error("--gh-release 需要配合 --tag")
+            # 高频误用：`--gh-release owner/repo v1.0.0`（漏了 --tag）
+            if args.url:
+                ap.error(
+                    "检测到你可能想写 `--gh-release %s %s`——"
+                    "tag 必须用 --tag 传递。\n"
+                    "正确写法：--gh-release %s --tag %s"
+                    % (args.gh_release, args.url, args.gh_release, args.url)
+                )
+            ap.error("--gh-release 需要配合 --tag TAG")
         url, size, sha, name = resolve_gh_release(
             args.gh_release, args.tag, token, args.asset)
         print("资产 %s  %s" % (name, human(size)), flush=True)
+    elif args.url and args.tag:
+        # 反向误用：给了 --tag 却没给 --gh-release
+        ap.error("--tag 只能配合 --gh-release 使用")
     if not url:
         ap.error("需要 url 或 --gh-release OWNER/REPO --tag TAG")
 
@@ -441,3 +463,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n已中断。分片已保留，重跑同一条命令即可续传。", file=sys.stderr)
         sys.exit(130)
+    except RuntimeError as e:
+        # 参数/远端数据这类用户可自行纠正的问题，给简洁提示而非 traceback
+        print("错误：%s" % e, file=sys.stderr)
+        sys.exit(1)
