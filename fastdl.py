@@ -46,6 +46,33 @@ DEFAULT_RETRIES = 6
 USER_AGENT = "fastdl/%s (+https://github.com/joker1point/gh-fast-download)" % __version__
 
 
+def _force_utf8_stdio() -> None:
+    """把标准输出切到 UTF-8。
+
+    Windows 控制台默认编码是 cp1252/cp936，无法编码部分中文字符，
+    打印 --help 或进度时会抛 UnicodeEncodeError。这里统一强制 UTF-8，
+    并对无法重配的流做降级（errors='replace'），保证只输出不崩。
+
+    在**导入时**执行，这样单元测试（import fastdl）也能受益——
+    放在 __main__ 里只对直接运行生效，测试环境会漏。
+    """
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None:
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            # Python < 3.7 或流不支持重配：退而求其次，容忍编码错误
+            try:
+                stream.reconfigure(errors="replace")
+            except Exception:  # noqa: BLE001
+                pass
+
+
+_force_utf8_stdio()
+
+
 # ---------------------------------------------------------------- 输出helpers
 
 def human(n: float) -> str:
@@ -408,29 +435,7 @@ def main(argv=None) -> int:
     return dl.run()
 
 
-def _force_utf8_stdio() -> None:
-    """把标准输出切到 UTF-8。
-
-    Windows 控制台默认编码是 cp1252/cp936，无法编码部分中文字符，
-    打印 --help 或进度时会抛 UnicodeEncodeError。这里统一强制 UTF-8，
-    并对无法重配的流做降级（errors='replace'），保证只输出不崩。
-    """
-    for name in ("stdout", "stderr"):
-        stream = getattr(sys, name, None)
-        if stream is None:
-            continue
-        try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
-        except (AttributeError, ValueError, OSError):
-            # Python < 3.7 或流不支持重配：退而求其次，容忍编码错误
-            try:
-                stream.reconfigure(errors="replace")
-            except Exception:  # noqa: BLE001
-                pass
-
-
 if __name__ == "__main__":
-    _force_utf8_stdio()
     try:
         sys.exit(main())
     except KeyboardInterrupt:

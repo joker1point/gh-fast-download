@@ -15,10 +15,17 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import os
 import ssl
 import sys
 import time
 import urllib.request
+
+# 复用 fastdl 的 UTF-8 stdio 处理（导入即生效，保证 Windows 控制台不崩）
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fastdl import _force_utf8_stdio  # noqa: E402
+
+_force_utf8_stdio()
 
 # 样本要足够大，否则测的是握手延迟而非吞吐：
 # 每片仅 393KB 时，8 连接的总耗时几乎全花在 TLS 握手 + RTT 上，
@@ -176,23 +183,7 @@ def main() -> int:
     return 0
 
 
-def _force_utf8_stdio() -> None:
-    """把标准输出切到 UTF-8，避免 Windows cp1252/cp936 控制台编码报错。"""
-    for name in ("stdout", "stderr"):
-        stream = getattr(sys, name, None)
-        if stream is None:
-            continue
-        try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
-        except (AttributeError, ValueError, OSError):
-            try:
-                stream.reconfigure(errors="replace")
-            except Exception:  # noqa: BLE001
-                pass
-
-
 if __name__ == "__main__":
-    _force_utf8_stdio()
     try:
         sys.exit(main())
     except KeyboardInterrupt:
