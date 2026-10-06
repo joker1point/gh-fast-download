@@ -39,35 +39,55 @@ python fastdl.py <URL>
 
 ## 二、快速开始
 
-零依赖，Python 3.8+ 直接跑。**不需要 clone**，下个附件就能用：
+零依赖，Python 3.8+ 直接跑。**不需要 clone，也不需要装 gh、不需要 token**
+（只有私有仓库才需要认证）：
 
 ```bash
-# 下载脚本（永远指向最新版）
+# 1) 拿到脚本（永远指向最新版）
 curl -LO https://github.com/joker1point/gh-fast-download/releases/latest/download/fastdl.py
 ```
 
-或者 clone 仓库（想跑测试、看源码用这个）：
+然后从 GitHub 下载大文件，只需知道三样东西：`owner/repo`、`tag`、资产名。
 
 ```bash
-git clone https://github.com/joker1point/gh-fast-download.git
-cd gh-fast-download
+# 2) 不确定资产名叫什么？先列出来看看
+python fastdl.py --gh-release cli/cli --tag v2.102.0 --list-assets
+# cli/cli @ v2.102.0  共 22 个资产
+#   gh_2.102.0_linux_amd64.tar.gz     14.6 MiB  sha256
+#   ...
+
+# 3) 下载（自动读取大小与官方 sha256，下完自动校验）
+python fastdl.py --gh-release cli/cli --tag v2.102.0 --asset gh_2.102.0_linux_amd64.tar.gz
 ```
 
-然后：
+### owner / tag / asset 从哪来？
+
+打开该项目的 **Releases 页面**，对着地址栏看就明白了：
+
+```
+https://github.com/cli/cli/releases/tag/v2.102.0
+                  └───┬──┘         └──┬───┘
+                  owner/repo        tag
+```
+
+资产名用上面的 `--list-assets` 查最快，或直接在页面 Assets 列表里看。
+
+> 直接把 release 页面地址粘给工具也行——它会告诉你该改成哪条命令，
+> 不会抛一堆看不懂的错。同理，只记得仓库地址也可以。
+
+### 其他常见用法
 
 ```bash
-# GitHub release：自动读取资产列表、文件大小、官方 sha256
-# 注意 owner/repo 和 tag 是两个独立参数，tag 必须用 --tag 传
+# 一个 release 只有一个资产时可省略 --asset
 python fastdl.py --gh-release owner/repo --tag v1.0.0
 
-# 一个 release 有多个资产时，用 --asset 指定
-python fastdl.py --gh-release owner/repo --tag v1.0.0 --asset mytool-linux.zip
-
-# 任意直链
+# 任意直链（从浏览器复制到的真实下载地址）
 python fastdl.py https://example.com/bigfile.tar.gz -o out.tar.gz
 
-# 调线程数和分片大小
-python fastdl.py https://example.com/bigfile.tar.gz -t 32 -c 4
+# 大文件想更快：调线程数和分片大小
+python fastdl.py https://example.com/bigfile.tar.gz -t 32 -c 8
+
+# 私有仓库：推荐用 gh auth login，而不是 --token
 ```
 
 Windows 上如果报证书错误，加 `--no-tls-verify`（原因见下方「踩过的坑」）。
@@ -119,6 +139,7 @@ python test_offline.py
 | `--gh-release OWNER/REPO` | 从 release 下载，自动取 size与官方 sha256 | — |
 | `--tag TAG` | release 的 tag，配合上面使用 | — |
 | `--asset NAME` | 资产名（一个 release 有多个资产时必填） | 唯一资产 |
+| `--list-assets` | 只列出该 release 的资产，不下载 | 关 |
 | `-o, --out PATH` | 输出路径 | URL 末段 |
 | `-t, --threads N` | 并发线程数 | `16` |
 | `-c, --chunk-mb N` | 分片大小（MiB） | `8` |

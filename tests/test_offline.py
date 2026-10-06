@@ -355,6 +355,183 @@ class TestCredentialSafety(unittest.TestCase):
         self.assertEqual(buf.getvalue(), "")
 
 
+class TestAnonymousApiAccess(unittest.TestCase):
+    """公开仓库无需认证：没装 gh、也没传 token 时不能直接报错。
+
+    历史问题（新用户第一眼就会撞上）：gh_api 在 gh CLI 不可用且无 token 时
+    直接抛 RuntimeError("无法调用 gh CLI，请安装 gh 并登录，或传入 --token")。
+    但下载**公开** release 根本不需要认证，这句话纯属误导。
+    现改为：无 token 时走匿名 API 请求。
+    """
+
+    class _FakeResp:
+        def __init__(self, payload=b'{"ok": true}'):
+            self._p = payload
+
+        def read(self):
+            return self._p
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _patch(self, captured):
+        from unittest import mock
+
+        class FakeOpener:
+            def open(self, req, timeout=None):
+                captured.append(req)
+                return TestAnonymousApiAccess._FakeResp()
+
+        return mock.patch.object(
+            fastdl.urllib.request, "build_opener",
+            return_value=FakeOpener(),
+        )
+
+    def test_no_token_still_queries_api(self):
+        """gh 不可用 + 无 token → 仍应发起匿名请求，而不是提前报错。"""
+        from unittest import mock
+        captured = []
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError("gh")), \
+                self._patch(captured):
+            out = fastdl.gh_api("repos/a/b/releases/tags/v1", None)
+        self.assertEqual(out, {"ok": True})
+        self.assertEqual(len(captured), 1, "应当发出了一次匿名请求")
+
+    def test_anonymous_request_sends_no_credentials(self):
+        """匿名请求绝不能携带 Authorization 头。"""
+        from unittest import mock
+        captured = []
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError("gh")), \
+                self._patch(captured):
+            fastdl.gh_api("repos/a/b/releases/tags/v1", None)
+        self.assertIsNone(captured[0].get_header("Authorization"))
+
+    def test_token_is_sent_when_provided(self):
+        """给了 token 才带 Authorization 头。"""
+        from unittest import mock
+        captured = []
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError("gh")), \
+                self._patch(captured):
+            fastdl.gh_api("repos/a/b/releases/tags/v1", "ghp_x")
+        self.assertEqual(captured[0].get_header("Authorization"), "token ghp_x")
+
+    def test_gh_cli_preferred_when_available(self):
+        """gh CLI 可用时应优先用它（免 token、配额更高）。"""
+        from unittest import mock
+
+        class R:
+            returncode = 0
+            stdout = '{"from": "cli"}'
+
+        captured = []
+        with mock.patch("subprocess.run", return_value=R()), self._patch(captured):
+            out = fastdl.gh_api("repos/a/b/releases/tags/v1", None)
+        self.assertEqual(out, {"from": "cli"})
+        self.assertEqual(captured, [], "gh 可用时不应再走 urllib")
+
+
+class TestListAssetsCli(unittest.TestCase):
+    """--list-assets 的参数校验（不触网）。"""
+
+    def _err(self, argv):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            with self.assertRaises(SystemExit) as cm:
+                fastdl.main(argv)
+        self.assertEqual(cm.exception.code, 2)
+        return buf.getvalue()
+
+    def test_requires_gh_release_and_tag(self):
+        self.assertIn("--list-assets", self._err(["--list-assets"]))
+        self.assertIn("--list-assets", self._err(["--list-assets",
+                                                  "--gh-release", "a/b"]))
+
+
+class TestGithubUrlHint(unittest.TestCase):
+    """GitHub 网页链接要给出可操作提示，而不是底层报错。
+
+    历史问题：把 release 页面地址粘进来，会一路走到 probe_size，
+    GitHub 对 HTML 返回 `Content-Range: bytes 0-0/*`，
+    int('*') 直接抛 ValueError，用户看到一堆 Python 堆栈。
+    """
+
+    def test_direct_asset_url_is_allowed_through(self):
+        """真正的直链必须放行，否则正常下载会被拦下。"""
+        for u in (
+            "https://github.com/cli/cli/releases/download/v2.10.0/x.zip",
+            "https://example.com/big.zip",
+            "https://objects.githubusercontent.com/abc/file.zip",
+        ):
+            self.assertIsNone(fastdl.github_url_hint(u), "不应拦截直链：%s" % u)
+
+    def test_release_page_suggests_gh_release(self):
+        h = fastdl.github_url_hint("https://github.com/cli/cli/releases/tag/v2.10.0")
+        self.assertIsNotNone(h)
+        self.assertIn("--gh-release cli/cli", h)
+        self.assertIn("--tag v2.10.0", h)
+
+    def test_repo_home_suggests_gh_release(self):
+        for u in ("https://github.com/cli/cli",
+                  "https://github.com/cli/cli.git",
+                  "https://github.com/cli/cli/"):
+            h = fastdl.github_url_hint(u)
+            self.assertIsNotNone(h, "应拦截仓库主页：%s" % u)
+            self.assertIn("cli/cli", h)
+
+    def test_releases_index_asks_for_tag(self):
+        for u in ("https://github.com/cli/cli/releases",
+                  "https://github.com/cli/cli/releases/latest"):
+            h = fastdl.github_url_hint(u)
+            self.assertIsNotNone(h, "应拦截 release 列表页：%s" % u)
+            self.assertIn("--tag", h)
+
+    def test_code_browse_links_detected(self):
+        for u in ("https://github.com/cli/cli/archive/refs/tags/v2.10.0.tar.gz",
+                  "https://github.com/cli/cli/tree/trunk",
+                  "https://github.com/cli/cli/blob/trunk/README.md"):
+            self.assertIsNotNone(fastdl.github_url_hint(u),
+                                 "应拦截代码浏览链接：%s" % u)
+
+    def test_query_and_fragment_do_not_confuse(self):
+        u = "https://github.com/cli/cli/releases/tag/v2.10.0?tab=readme#notes"
+        h = fastdl.github_url_hint(u)
+        self.assertIsNotNone(h)
+        self.assertIn("v2.10.0", h)
+
+
+class TestContentRangeParsing(unittest.TestCase):
+    """Content-Range 解析必须容错。
+
+    历史问题：`bytes 0-0/*`（GitHub 对 HTML 页面返回）会 int('*') 崩溃。
+    """
+
+    def test_known_total(self):
+        self.assertEqual(fastdl._parse_total("bytes 0-0/12345"), 12345)
+
+    def test_unknown_total_star(self):
+        """`*` 表示总长未知，应返回 None 而不是崩溃。"""
+        self.assertIsNone(fastdl._parse_total("bytes 0-0/*"))
+
+    def test_unsatisfied_range_carries_known_total(self):
+        """RFC 7233：416 响应用 `bytes */<total>` 表达总长度。
+
+        此时总长是**已知**的 123，解析出来是对的。
+        （实践中 urllib 会对 416 抛 HTTPError，一般到不了这里，
+        但语义正确性应当保持。）
+        """
+        self.assertEqual(fastdl._parse_total("bytes */123"), 123)
+
+    def test_malformed_inputs(self):
+        for bad in ("", "bytes 0-0", "garbage", "bytes 0-0/abc", "bytes x-y/z"):
+            self.assertIsNone(fastdl._parse_total(bad),
+                              "畸形输入应返回 None：%r" % bad)
+
+
 class TestCliArgValidation(unittest.TestCase):
     """参数校验回归测试。
 

@@ -5,6 +5,52 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-06
+
+本次起因：以**新用户视角**从零走一遍流程，发现三道拦路门槛。
+
+### 新增
+
+- **`--list-assets`**：列出某个 release 的全部资产及大小，不下载。
+  新用户最常卡在"`--asset` 到底填什么"，现在一条命令就能查，
+  不用去网页上一个个抄
+- **公开仓库不再需要 `gh` CLI 或 token**（重要修复，见下）
+
+### 修复
+
+- **公开仓库下载被误报"需要认证"** —— 这是新用户第一眼就会撞上的门槛。
+  此前 `gh_api()` 在 gh CLI 不可用且未传 token 时，直接抛
+  `RuntimeError("无法调用 gh CLI，请安装 gh 并登录，或传入 --token")`。
+  但下载**公开** release 根本不需要认证，这句话纯属误导。
+  - 现改为：无 token 时走**匿名 GitHub API 请求**（限速 60 次/小时，
+    取一次 release 元数据绰绰有余）
+  - 仅当匿名请求返回 404/403 时，才提示可能需要认证
+  - 匿名请求**绝不携带** `Authorization` 头（有测试钉住）
+- **粘错链接不再抛裸 traceback**：把 release 页面或仓库主页地址
+  当作 URL 传入时，此前会一路走到 `probe_size`，而 GitHub 对 HTML 返回
+  `Content-Range: bytes 0-0/*`，`int('*')` 抛
+  `ValueError: invalid literal for int() with base 10: '*'`
+  - 根因修复：`_parse_total()` 正确处理 `*`（总长未知）与畸形输入
+  - 体验修复：新增 `github_url_hint()`，识别 release 页 / 仓库页 /
+    代码浏览链接，直接告诉用户该改成哪条命令
+  - CLI 兜底捕获 `ValueError`，解析类问题不再以堆栈形式呈现
+- 详情未知时的提示更具体：区分"链接指向网页"与"服务端不支持 Range"，
+  并给出"右键复制真实下载地址"的操作指引
+
+### 变更
+
+- 多资产 / 资产名写错时，可选列表改为**逐行竖排**（此前挤在一行难读）
+
+### 测试
+
+- 43 个离线测试（较 v1.0.1 新增 15 个），新增覆盖：
+  - `TestAnonymousApiAccess`：无 token 时确实发出匿名请求、
+    匿名请求不带凭据、有 token 才带凭据、gh CLI 可用时优先走 CLI
+  - `TestGithubUrlHint`：直链放行、各类网页链接拦截并给出正确命令
+  - `TestContentRangeParsing`：`bytes 0-0/*` 不崩溃、
+    `bytes */N`（RFC 7233）正确解析、畸形输入返回 None
+  - `TestListAssetsCli`：参数校验
+
 ## [1.0.1] - 2026-10-06
 
 ### 安全
@@ -64,6 +110,7 @@
 - 收尾清理拖垮主流程 → 清理失败只警告，不影响退出码
 - `Range` 未校验导致测速失真 → 强制校验 `Content-Range`
 
-[Unreleased]: https://github.com/joker1point/gh-fast-download/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/joker1point/gh-fast-download/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/joker1point/gh-fast-download/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/joker1point/gh-fast-download/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/joker1point/gh-fast-download/releases/tag/v1.0.0

@@ -28,6 +28,7 @@ import concurrent.futures
 import hashlib
 import json
 import os
+import re
 import shutil
 import ssl
 import sys
@@ -38,7 +39,7 @@ import urllib.parse
 import urllib.request
 from urllib.parse import unquote
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 DEFAULT_THREADS = 16
 DEFAULT_CHUNK = 8 * 1024 * 1024# 8 MiB
@@ -164,10 +165,28 @@ def warn_insecure_credential(no_tls_verify: bool, token: str | None) -> bool:
     return False
 
 
+def _parse_total(cr: str):
+    """从 Content-Range 解析总长度。
+
+    `bytes 0-0/12345` → 12345
+    `bytes 0-0/*`     → None（总长未知）
+
+    注意 `*` 的情况：GitHub 对 HTML 页面（仓库页 / release 页）会返回
+    `Content-Range: bytes 0-0/*`。早期版本直接 int() 会抛
+    `ValueError: invalid literal for int() with base 10: '*'`，
+    用户粘错链接就看到一堆 Python 堆栈。
+    """
+    if not cr or "/" not in cr:
+        return None
+    total = cr.rsplit("/", 1)[-1].strip()
+    return int(total) if total.isdigit() else None
+
+
 def probe_size(opener, url: str, token: str | None):
     """用 Range 请求探测大小与是否支持断点续传。
 
-    返回 (total_size, accept_ranges)。服务端忽略 Range 时 total 为 None。
+    返回 (total_size, accept_ranges)。
+    服务端不支持分片、或总长未知时 total 为 None。
     """
     req = urllib.request.Request(url)
     req.add_header("Range", "bytes=0-0")
@@ -178,8 +197,12 @@ def probe_size(opener, url: str, token: str | None):
         status = r.status
         cr = r.headers.get("Content-Range")
         r.read(1)
-    if cr and "/" in cr:
-        return int(cr.split("/")[-1]), True
+    total = _parse_total(cr)
+    if total is not None:
+        return total, True
+    if cr:
+        # 有 Content-Range 但总长是 `*`：多为网页响应，无法分片下载
+        return None, False
     # 无 Content-Range：退回 HEAD
     try:
         req2 = urllib.request.Request(url, method="HEAD")
@@ -187,7 +210,9 @@ def probe_size(opener, url: str, token: str | None):
         if token:
             req2.add_header("Authorization", "token " + token)
         with opener.open(req2, timeout=30) as r2:
-            return int(r2.headers.get("Content-Length", 0)), status == 200
+            clen = r2.headers.get("Content-Length")
+            size = int(clen) if (clen or "").isdigit() else None
+            return size, status == 200
     except Exception:
         return None, False
 
@@ -204,6 +229,52 @@ def sha256_file(path: str, bufsize: int = 1 << 22) -> str:
 
 
 # ---------------------------------------------------------------- GitHub 集成
+
+# 匹配 GitHub 网页/仓库链接（直链会带 releases/download/，另行放过）
+_GH_WEB_RE = re.compile(
+    r"^https?://(?:www\.)?github\.com/(?P<owner>[^/?#]+)/(?P<repo>[^/?#]+?)"
+    r"(?:\.git)?(?:/(?P<rest>[^?#]*))?/?$"
+)
+
+
+def github_url_hint(url: str):
+    """若给的是 GitHub **网页**链接而非可下载直链，返回可操作的提示。
+
+    新用户最常见的一步操作失误，就是把 release 页面或仓库主页地址
+    直接粘进来。此时若只抛一个底层报错（如 ValueError），用户完全
+    不知道该怎么办。这里直接把「应该改用哪条命令」写清楚。
+
+    返回 None 表示链接看起来是可下载直链，或不是 GitHub 链接。
+    """
+    m = _GH_WEB_RE.match(url.split("?")[0].split("#")[0])
+    if not m:
+        return None
+    owner, repo = m.group("owner"), m.group("repo")
+    rest = (m.group("rest") or "").strip("/")
+
+    if rest.startswith("releases/download/"):
+        return None  # 合法直链，交给正常流程
+    if not rest:
+        return ("%s/%s 是仓库主页，不是可下载的直链。\n"
+                "  下载它的 release：--gh-release %s/%s --tag <tag>\n"
+                "  （想看有哪些 tag，可先访问该仓库的 Releases 页面）"
+                % (owner, repo, owner, repo))
+    if rest.startswith("releases/tag/"):
+        tag = rest[len("releases/tag/"):]
+        return ("这是 release **页面**链接，不是可下载的直链。\n"
+                "  改用：--gh-release %s/%s --tag %s\n"
+                "  （该 release 有多个资产时，再加 --asset <文件名>）"
+                % (owner, repo, tag))
+    if rest in ("releases", "releases/latest"):
+        return ("这是 release 列表页，需要指明具体版本：\n"
+                "  --gh-release %s/%s --tag <tag>" % (owner, repo))
+    if rest.startswith(("archive/", "tree/", "blob/")) or rest in ("archive", "tree", "blob"):
+        return ("这是代码浏览 / 源码包链接，不是 release 资产。\n"
+                "  想下载源码压缩包，建议直接 `git clone`；\n"
+                "  若目标是 release 资产，请用 --gh-release %s/%s --tag <tag>"
+                % (owner, repo))
+    return None
+
 
 def gh_api(path: str, token: str | None, no_tls_verify: bool = False):
     """调用 GitHub API。优先用 gh CLI（已登录时免 token），否则用 urllib。
@@ -224,12 +295,19 @@ def gh_api(path: str, token: str | None, no_tls_verify: bool = False):
             return json.loads(out.stdout)
     except Exception:
         pass
-    if not token:
-        raise RuntimeError("无法调用 gh CLI，请安装 gh 并登录，或传入 --token")
+    # 回退到 urllib。
+    #
+    # 关键：**公开仓库无需认证**，所以 token 是可选的。
+    # 没有 token 就走匿名请求——GitHub 允许匿名访问 API
+    # （限速 60 次/小时，但取一次 release 元数据绰绰有余）。
+    # 早期版本在这里直接报"请安装 gh 并登录或传 --token"，
+    # 对只想下个公开文件的用户是纯误导，已修正。
     req = urllib.request.Request("https://api.github.com/" + path)
     req.add_header("User-Agent", USER_AGENT)
     req.add_header("Accept", "application/vnd.github+json")
-    req.add_header("Authorization", "token " + token)
+    if token:
+        req.add_header("Authorization", "token " + token)
+
     if no_tls_verify:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
@@ -241,8 +319,47 @@ def gh_api(path: str, token: str | None, no_tls_verify: bool = False):
         https_handler,
         urllib.request.ProxyHandler({}),
     )
-    with op.open(req, timeout=60) as r:
-        return json.loads(r.read().decode())
+    try:
+        with op.open(req, timeout=60) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        if e.code == 404 and not token:
+            raise RuntimeError(
+                "GitHub API 返回 404：仓库或 tag 不存在，"
+                "也可能这是**私有仓库**、需要认证。\n"
+                "  · 公开仓库无需任何认证，请先核对 owner/repo 与 tag 是否正确；\n"
+                "  · 私有仓库请用 `gh auth login`（推荐）或传 --token。"
+            )
+        if e.code == 403 and not token:
+            raise RuntimeError(
+                "GitHub API 返回 403，通常是匿名请求触发了限速"
+                "（每小时 60 次）。\n"
+                "  · 稍后重试；或 `gh auth login` / 传 --token 以提高配额。"
+            )
+        raise
+
+
+def list_gh_release_assets(repo: str, tag: str, token: str | None,
+                           no_tls_verify: bool = False) -> None:
+    """打印某个 release 的全部资产，供用户决定 --asset 填什么。
+
+    新用户最常卡住的一步就是"资产名到底叫什么"。与其让他们去网页上
+    一个个抄，不如直接列出来。
+    """
+    data = gh_api("repos/%s/releases/tags/%s" % (repo, tag), token, no_tls_verify)
+    assets = data.get("assets") or []
+    print("%s @ %s  共 %d 个资产" % (repo, tag, len(assets)))
+    if not assets:
+        print("（该 release 没有可下载资产，可能只有源码压缩包）")
+        return
+    print("")
+    print("  %-44s %12s" % ("名称（--asset 用这个）", "大小"))
+    print("  " + "-" * 58)
+    for a in assets:
+        has_sha = "sha256" if (a.get("digest") or "").startswith("sha256:") else "—"
+        print("  %-44s %12s  %s" % (a["name"], human(int(a["size"])), has_sha))
+    print("")
+    print("用法：--gh-release %s --tag %s --asset <上面的名称>" % (repo, tag))
 
 
 def resolve_gh_release(repo: str, tag: str, token: str | None, asset: str | None,
@@ -259,13 +376,18 @@ def resolve_gh_release(repo: str, tag: str, token: str | None, asset: str | None
                 picked = a
                 break
         if picked is None:
-            names = ", ".join(a["name"] for a in assets)
-            raise RuntimeError("找不到资产 %r。可选：%s" % (asset, names))
+            names = "\n  ".join(a["name"] for a in assets)
+            raise RuntimeError(
+                "找不到资产 %r。该 release 的可选资产：\n  %s\n"
+                "（提示：加 --list-assets 可随时列出）" % (asset, names)
+            )
     else:
         if len(assets) > 1:
-            names = ", ".join(a["name"] for a in assets)
-            raise RuntimeError("该 release 有多个资产，请用 --asset 指定其一：%s"
-                               % names)
+            names = "\n  ".join(a["name"] for a in assets)
+            raise RuntimeError(
+                "该 release 有多个资产，请用 --asset 指定其一：\n  %s\n"
+                "（提示：加 --list-assets 可随时列出）" % names
+            )
         picked = assets[0]
     digest = picked.get("digest") or ""
     sha = digest.split("sha256:")[-1] if digest.startswith("sha256:") else None
@@ -430,6 +552,9 @@ def main(argv=None) -> int:
                     help="从 GitHub release 下载，自动取 size 与官方 sha256")
     ap.add_argument("--tag", help="配合 --gh-release 使用的 tag")
     ap.add_argument("--asset", help="配合 --gh-release 指定资产名（多资产时必填）")
+    ap.add_argument("--list-assets", action="store_true",
+                    help="只列出该 release 的所有资产及大小，不下载"
+                         "（忘了资产名时用这个）")
     ap.add_argument("--token", help="私有仓库 token（也可用环境变量 GITHUB_TOKEN）。"
                                     "注意：不要与 --no-tls-verify 同时使用")
     ap.add_argument("--no-tls-verify", action="store_true",
@@ -446,6 +571,14 @@ def main(argv=None) -> int:
 
     token = args.token or os.environ.get("GITHUB_TOKEN")
     warn_insecure_credential(args.no_tls_verify, token)
+
+    # --list-assets：只列资产，不下载。用来回答"资产名到底叫什么"。
+    if args.list_assets:
+        if not args.gh_release or not args.tag:
+            ap.error("--list-assets 需要配合 --gh-release OWNER/REPO --tag TAG")
+        list_gh_release_assets(args.gh_release, args.tag, token,
+                               args.no_tls_verify)
+        return 0
 
     url, size, sha, name = args.url, None, args.sha256, None
     if args.gh_release:
@@ -468,6 +601,12 @@ def main(argv=None) -> int:
     if not url:
         ap.error("需要 url 或 --gh-release OWNER/REPO --tag TAG")
 
+    # 粘了 GitHub 网页链接（仓库页 / release 页）是最常见的新手失误。
+    # 与其让它一路走到 probe_size 抛底层异常，不如在这里直接说清怎么改。
+    hint = github_url_hint(url)
+    if hint:
+        ap.error(hint)
+
     out = args.out
     if not out:
         base = url.split("?")[0].rstrip("/").split("/")[-1]
@@ -479,7 +618,14 @@ def main(argv=None) -> int:
     if size is None:
         size, ranged = probe_size(opener, url, token)
         if not size:
-            print("无法确定文件大小，服务端可能不支持 HEAD", file=sys.stderr)
+            print("错误：无法确定文件大小，也就无法分片下载。", file=sys.stderr)
+            print("  常见原因：链接指向的是网页（仓库页 / release 页）"
+                  "而不是文件本身，", file=sys.stderr)
+            print("  或该地址不支持 Range / 需要登录。", file=sys.stderr)
+            print("  建议：到 release 页面右键复制资产的**真实下载地址**"
+                  "（形如 .../releases/download/<tag>/<文件名>），", file=sys.stderr)
+            print("        或改用 --gh-release <owner>/<repo> --tag <tag>。",
+                  file=sys.stderr)
             return 5
         if not ranged:
             print("警告：服务端不支持 Range 请求，断点续传不可用，"
@@ -520,4 +666,13 @@ if __name__ == "__main__":
     except OSError as e:
         # 磁盘写满、权限不足、路径非法等
         print("系统错误：%s" % e, file=sys.stderr)
+        sys.exit(1)
+    except ValueError as e:
+        # 兜底：解析远端返回内容时出错（如异常的 Content-Range）。
+        # 这类问题不该以裸 traceback 的形式甩给用户。
+        print("解析远端响应失败：%s" % e, file=sys.stderr)
+        print("请确认 URL 指向的是文件本身而非网页；"
+              "若问题持续，欢迎反馈："
+              "https://github.com/joker1point/gh-fast-download/issues",
+              file=sys.stderr)
         sys.exit(1)
