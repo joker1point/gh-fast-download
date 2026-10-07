@@ -16,6 +16,13 @@ curl -LO https://github.com/joker1point/gh-fast-download/releases/latest/downloa
 python fastdl.py <URL>
 ```
 
+<p align="center">
+  <img src="docs/screenshots/fastdl-compare.png" width="820"
+       alt="同字节数对比：普通下载 190.7 秒（21.5 KiB/s）vs fastdl 8 线程 52.3 秒（78.3 KiB/s），提速 3.65×，两者 sha256 一致"><br>
+  <sub>真实运行截图（<code>demo/compare_download.py --limit-mb 4</code>）：两种方式各下相同 4 MiB，实测提速 <b>3.65×</b>，
+  并逐字节核对 sha256。提速取决于你的链路是否被限速 —— 跑出接近 1× 时脚本会如实说明。</sub>
+</p>
+
 📋 [更新日志](CHANGELOG.md) · 🐛 [反馈问题](https://github.com/joker1point/gh-fast-download/issues) · 📄 [贡献指南](CONTRIBUTING.md)
 
 ---
