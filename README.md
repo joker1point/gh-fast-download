@@ -23,7 +23,7 @@ python fastdl.py <URL>
   并逐字节核对 sha256。提速取决于你的链路是否被限速 —— 跑出接近 1× 时脚本会如实说明。</sub>
 </p>
 
-📋 [更新日志](CHANGELOG.md) · 🐛 [反馈问题](https://github.com/joker1point/gh-fast-download/issues) · 📄 [贡献指南](CONTRIBUTING.md)
+📋 [更新日志](CHANGELOG.md) · 🐛 [反馈问题](https://github.com/joker1point/gh-fast-download/issues) · 📄 [贡献指南](CONTRIBUTING.md) · 📊 [项目演示](https://my.feishu.cn/docx/YbUtdQ0XMoIGcHxdoyFciGJxnnf)
 
 ---
 
